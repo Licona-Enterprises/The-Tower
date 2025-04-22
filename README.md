@@ -4,7 +4,7 @@
 Inspired by the world of Destiny, The Tower is where your agents return, recharge, and deploy new missions.
 
 The Tower is the central hub for agent tools, agent frameworks, and scripts — designed for developers and automated systems alike.
-Whether you're monitoring, training, or deploying intelligent systems, The Tower acts as your base of operations — organizing tools like the Cryptarch (human-facing monitoring UI) and more to come, each named after iconic classes, factions, and characters.
+Whether you're monitoring, training, or deploying intelligent systems, The Tower acts as your base of operations — organizing tools and frameworks, each named after iconic classes, factions, and characters.
 
 ## 🌌 Why The Tower?
 In Destiny, The Tower is where Guardians regroup, strategize, and equip themselves for battle. Here, your agents and tools do the same — allowing you to manage your AI ecosystem with clarity and control.
