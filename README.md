@@ -1,3 +1,5 @@
+![The Tower](https://static0.gamerantimages.com/wordpress/wp-content/uploads/2020/01/destiny-2-ikora-tower-portal.jpg)
+
 # The Tower
 Inspired by the world of Destiny, The Tower is where your agents return, recharge, and deploy new missions.
 
