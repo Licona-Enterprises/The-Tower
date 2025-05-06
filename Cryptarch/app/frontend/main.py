@@ -21,6 +21,8 @@ if 'last_refresh' not in st.session_state:
     st.session_state.uniswap_refresh_count = 0
     st.session_state.aave_last_refresh = time.time()
     st.session_state.aave_refresh_count = 0
+    # Initialize refresh tracking for AAVE Token Balances tab
+    st.session_state.aave_balances_last_refresh = datetime.now()
     # Initialize Excel download states
     st.session_state.show_download = False
 
@@ -33,6 +35,7 @@ AUTO_REFRESH_INTERVAL = consts.AUTO_REFRESH_INTERVAL
 
 from uniswap import render_uniswap_page  # Import the uniswap module
 from aave import render_aave_page  # Import the aave module
+from aave_token_balances import render_aave_token_balances_page  # Import the new aave_token_balances module
 from api_service import ApiService  # Import the API service
 
 # Initialize API service
@@ -211,7 +214,7 @@ def fetch_market_data():
     return market_data
 
 # Create tabs for different sections
-tab_names = ["Market Data", "Uniswap Positions", "AAVE Positions"]
+tab_names = ["Market Data", "Uniswap Positions", "AAVE Positions", "AAVE Token Balances"]
 
 # Create a hidden radio button that tracks the tab state 
 # This is necessary because Streamlit doesn't provide a direct way to detect tab changes
@@ -242,6 +245,9 @@ if current_tab_index != prev_tab:
         st.session_state.uniswap_last_refresh = time.time()
     elif current_tab_index == 2 and prev_tab != 2:  # Changed to AAVE
         st.session_state.aave_last_refresh = time.time()
+    elif current_tab_index == 3 and prev_tab != 3:  # Changed to AAVE Token Balances
+        if 'aave_balances_last_refresh' not in st.session_state:
+            st.session_state.aave_balances_last_refresh = datetime.now()
     
     # Store the new tab index
     st.session_state._previous_tab = prev_tab
@@ -509,6 +515,10 @@ with tabs[2]:
     # Render aave page from imported module
     render_aave_page(api_service)
 
+with tabs[3]:
+    # Render AAVE token balances page
+    render_aave_token_balances_page()
+
 # Store the current tab for refresh logic
 if "tab_change_enabled" not in st.session_state:
     st.session_state.tab_change_enabled = True
@@ -539,5 +549,17 @@ elif current_tab == 2:  # AAVE tab
         st.session_state.aave_last_refresh = time.time()
         st.session_state.aave_refresh_count += 1
         st.rerun()
+    time.sleep(1)  # Small sleep to prevent excessive CPU usage
+    st.rerun()
+elif current_tab == 3:  # AAVE Token Balances tab
+    # Initialize refresh tracking for the AAVE Token Balances tab if it doesn't exist
+    if 'aave_balances_last_refresh' not in st.session_state:
+        st.session_state.aave_balances_last_refresh = datetime.now()
+    
+    # Check if refresh interval has elapsed
+    time_since_refresh = (datetime.now() - st.session_state.aave_balances_last_refresh).total_seconds()
+    if time_since_refresh >= AAVE_REFRESH_INTERVAL:
+        # We'll refresh on the next cycle through the render function
+        pass
     time.sleep(1)  # Small sleep to prevent excessive CPU usage
     st.rerun()

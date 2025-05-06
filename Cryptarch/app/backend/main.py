@@ -22,6 +22,7 @@ from consts import DEFAULT_ASSETS, METRIC_FREQUENCIES, PORTFOLIOS
 from coinmetrics import CoinMetricsService
 from web3_uniswap_position_calculator import get_uniswap_wallet_addresses, process_positions
 from web3_aave_position_calculator import get_aave_wallet_addresses, get_wallet_aave_positions
+from historical_prices import HistoricalPriceService
 
 load_dotenv()
 
@@ -29,6 +30,7 @@ app = FastAPI()
 
 # Initialize services
 coinmetrics_service = CoinMetricsService()
+historical_price_service = HistoricalPriceService(os.getenv("COINMETRICS_API_KEY", ""))
 
 @app.get("/api/market-data")
 async def get_market_data(
@@ -685,3 +687,281 @@ async def test_uniswap_config():
         }
     except Exception as e:
         return {"error": f"Error in test_uniswap_config: {str(e)}"}
+
+@app.get("/api/historical-prices")
+async def get_historical_prices(
+    assets: List[str] = Query(default=DEFAULT_ASSETS),
+    days: int = Query(default=365, ge=1, le=1825),
+    with_indicators: bool = Query(default=True),
+    with_volatility: bool = Query(default=False),
+    indicators: Optional[List[str]] = Query(default=None)
+):
+    """
+    Get historical price data with technical indicators and optional volatility metrics.
+    
+    Args:
+        assets: List of asset symbols (e.g., BTC, ETH)
+        days: Number of days of historical data to fetch (1-1825)
+        with_indicators: Whether to include technical indicators
+        with_volatility: Whether to include volatility metrics
+        indicators: List of specific indicators to include (if None, uses defaults)
+        
+    Returns:
+        JSON with historical price data including indicators for frontend consumption
+    """
+    try:
+        # Validate assets
+        if not assets:
+            return {"error": "No assets specified"}
+            
+        # Get available indicators for reference
+        available_indicators = historical_price_service.get_indicator_names()
+            
+        # Fetch the data
+        if with_volatility:
+            # Get data with both indicators and volatility metrics
+            result_dfs = historical_price_service.get_price_history_with_volatility(
+                token_symbols=assets,
+                days_back=days,
+                with_indicators=with_indicators,
+                indicators=indicators
+            )
+        elif with_indicators:
+            # Get data with just indicators
+            result_dfs = historical_price_service.get_price_history_with_indicators(
+                token_symbols=assets,
+                days_back=days,
+                indicators=indicators
+            )
+        else:
+            # Get raw price data only
+            price_history = historical_price_service.get_price_history(
+                token_symbols=assets,
+                days_back=days
+            )
+            result_dfs = historical_price_service.price_history_to_dataframe(price_history)
+            
+        # Convert DataFrames to JSON format suitable for frontend
+        result = {}
+        for symbol, df in result_dfs.items():
+            # Reset index to include date in the JSON output
+            df_with_date = df.reset_index()
+            # Convert to records format (list of dictionaries)
+            result[symbol] = df_with_date.to_dict(orient="records")
+            
+        return {
+            "status": "success",
+            "assets": assets,
+            "days": days,
+            "with_indicators": with_indicators,
+            "with_volatility": with_volatility,
+            "indicators_used": indicators if indicators else available_indicators,
+            "data": result
+        }
+            
+    except Exception as e:
+        return {"error": f"Error fetching historical prices: {str(e)}"}
+
+@app.get("/api/volatility-metrics")
+async def get_volatility_metrics(
+    assets: List[str] = Query(default=DEFAULT_ASSETS),
+    days: int = Query(default=365, ge=1, le=1825), 
+    windows: List[int] = Query(default=[7, 30, 90])
+):
+    """
+    Get volatility metrics for specified assets.
+    
+    This endpoint returns historical volatility data including:
+    - Realized volatility for different time windows
+    - Rolling high/low volatility
+    - Volatility ratios between short-term and long-term periods
+    - Implied volatility estimates
+    
+    Args:
+        assets: List of asset symbols (e.g., BTC, ETH)
+        days: Number of days of historical data to fetch (1-1825)
+        windows: List of window sizes in days for volatility calculations
+        
+    Returns:
+        JSON with volatility metrics for frontend consumption
+    """
+    try:
+        # Validate assets
+        if not assets:
+            return {"error": "No assets specified"}
+            
+        # Fetch data with volatility metrics
+        result_dfs = historical_price_service.get_price_history_with_volatility(
+            token_symbols=assets,
+            days_back=days,
+            with_indicators=False,  # No technical indicators needed
+            volatility_windows=windows
+        )
+            
+        # Filter columns to include only volatility metrics and price data
+        volatility_results = {}
+        for symbol, df in result_dfs.items():
+            # Make a copy to avoid modifying the original
+            vol_df = df.copy()
+            
+            # Keep only price columns and volatility columns
+            vol_columns = ['open', 'high', 'low', 'close']
+            
+            # Add columns that contain volatility metrics
+            for col in df.columns:
+                if any(term in col for term in ['vol_', 'volatility', 'implied']):
+                    vol_columns.append(col)
+            
+            # Filter to only the columns we want
+            vol_df = vol_df[vol_columns]
+            
+            # Reset index to include date in the JSON output
+            vol_df_with_date = vol_df.reset_index()
+            
+            # Convert to records format (list of dictionaries)
+            volatility_results[symbol] = vol_df_with_date.to_dict(orient="records")
+            
+        return {
+            "status": "success",
+            "assets": assets,
+            "days": days,
+            "windows": windows,
+            "data": volatility_results
+        }
+            
+    except Exception as e:
+        return {"error": f"Error fetching volatility metrics: {str(e)}"}
+
+@app.get("/api/simplified-volatility")
+async def get_simplified_volatility(
+    assets: List[str] = Query(default=DEFAULT_ASSETS),
+    days: int = Query(default=30, ge=1, le=365), 
+    windows: List[int] = Query(default=[7, 14, 30])
+):
+    """
+    Get simplified volatility metrics for specified assets.
+    
+    This is a more lightweight endpoint that doesn't use option data or other
+    computationally expensive calculations. It returns basic volatility metrics
+    that can be calculated quickly.
+    
+    Args:
+        assets: List of asset symbols (e.g., BTC, ETH)
+        days: Number of days of historical data to fetch (1-365)
+        windows: List of window sizes in days for volatility calculations
+        
+    Returns:
+        JSON with basic volatility metrics for frontend consumption
+    """
+    try:
+        # Validate assets
+        if not assets:
+            return {"error": "No assets specified"}
+            
+        # Get raw price data
+        price_history = historical_price_service.get_price_history(
+            token_symbols=assets,
+            days_back=days
+        )
+        
+        # Convert to DataFrames
+        price_dfs = historical_price_service.price_history_to_dataframe(price_history)
+        
+        # Add just basic volatility metrics without options data
+        result_dfs = historical_price_service.add_volatility_metrics(price_dfs, windows)
+            
+        # Convert DataFrames to JSON format
+        volatility_results = {}
+        for symbol, df in result_dfs.items():
+            # Reset index to include date in the JSON output
+            df_with_date = df.reset_index()
+            # Convert to records format (list of dictionaries)
+            volatility_results[symbol] = df_with_date.to_dict(orient="records")
+            
+        return {
+            "status": "success",
+            "assets": assets,
+            "days": days,
+            "windows": windows,
+            "data": volatility_results
+        }
+            
+    except Exception as e:
+        return {"error": f"Error fetching simplified volatility metrics: {str(e)}"}
+
+@app.get("/api/aave-token-balances")
+async def get_aave_token_balances(
+    portfolio: Optional[str] = Query(default=None),
+    strategy: Optional[str] = Query(default=None),
+    chain: Optional[str] = Query(default=None)
+):
+    """
+    Get AAVE token balances from block explorers.
+    
+    Args:
+        portfolio: Optional filter by portfolio name
+        strategy: Optional filter by strategy name
+        chain: Optional filter by chain (polygon, arbitrum, optimism, base)
+    
+    Returns:
+        List of AAVE token balances
+    """
+    try:
+        # Import scanner here to avoid circular imports
+        from block_explorers import AaveUniswapScanner
+        
+        # Initialize scanner
+        scanner = AaveUniswapScanner()
+        
+        # Fetch all balances
+        all_balances = scanner.fetch_all_balances()
+        
+        # Convert to list format for JSON response
+        balances_data = []
+        for (chain_name, portfolio_or_strategy, wallet, token_name), balance in all_balances.items():
+            # Determine if this is a portfolio or strategy
+            is_portfolio = portfolio_or_strategy in PORTFOLIOS
+            
+            portfolio_name = portfolio_or_strategy if is_portfolio else next(
+                (p for p, details in PORTFOLIOS.items() 
+                 if "STRATEGY_WALLETS" in details and portfolio_or_strategy in details["STRATEGY_WALLETS"]),
+                "Unknown"
+            )
+            strategy_name = "Main Wallet" if is_portfolio else portfolio_or_strategy
+            
+            # Create balance entry
+            balance_entry = {
+                "chain": chain_name,
+                "portfolio": portfolio_name,
+                "strategy": strategy_name,
+                "wallet": wallet,
+                "token": token_name.split('_')[0],  # Extract token symbol from the full name
+                "token_full_name": token_name,
+                "balance": balance
+            }
+            
+            # Apply filters if specified
+            if portfolio and portfolio_name.lower() != portfolio.lower():
+                continue
+                
+            if strategy and strategy_name.lower() != strategy.lower():
+                continue
+                
+            if chain and chain_name.lower() != chain.lower():
+                continue
+                
+            balances_data.append(balance_entry)
+        
+        return {
+            "count": len(balances_data),
+            "balances": balances_data
+        }
+        
+    except Exception as e:
+        return {"error": f"Error retrieving AAVE token balances: {str(e)}"}
+
+# Add this at the end of the file for running the app
+if __name__ == "__main__":
+    import uvicorn
+    # Run on port 8000 to avoid conflicts
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
