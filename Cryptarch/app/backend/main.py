@@ -18,7 +18,7 @@ from fastapi import FastAPI, Query
 from typing import Optional, List, Dict, Any
 
 # Now import local modules
-from consts import DEFAULT_ASSETS, METRIC_FREQUENCIES, PORTFOLIOS
+from consts import DEFAULT_ASSETS, METRIC_FREQUENCIES, PORTFOLIOS, TOKENS
 from coinmetrics import CoinMetricsService
 from web3_uniswap_position_calculator import get_uniswap_wallet_addresses, process_positions
 from web3_aave_position_calculator import get_aave_wallet_addresses, get_wallet_aave_positions
@@ -929,14 +929,27 @@ async def get_aave_token_balances(
             )
             strategy_name = "Main Wallet" if is_portfolio else portfolio_or_strategy
             
+            # Get token symbol from consts.py
+            token_symbol = None
+            token_parts = token_name.split('_')
+            # Handle nested tokens (like AAVE tokens)
+            if token_parts[0] in TOKENS and token_name in TOKENS[token_parts[0]]:
+                token_symbol = TOKENS[token_parts[0]][token_name].get("symbol", token_parts[0])
+            # Handle direct tokens
+            elif token_name in TOKENS:
+                token_symbol = TOKENS[token_name].get("symbol", token_parts[0])
+            else:
+                token_symbol = token_parts[0]
+            
             # Create balance entry
             balance_entry = {
                 "chain": chain_name,
                 "portfolio": portfolio_name,
                 "strategy": strategy_name,
                 "wallet": wallet,
-                "token": token_name.split('_')[0],  # Extract token symbol from the full name
+                "token": token_parts[0],  # Extract token group from the full name
                 "token_full_name": token_name,
+                "token_symbol": token_symbol,
                 "balance": balance
             }
             

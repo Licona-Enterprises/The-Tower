@@ -91,16 +91,21 @@ def render_aave_token_balances_page():
     df = st.session_state.aave_balances_df.copy()
     
     if not df.empty:
+        # Select and reorder just the columns we want to display
+        display_cols = ["portfolio", "strategy", "token_symbol", "balance", "wallet"]
+        
+        # Create a display dataframe with just these columns if they exist
+        display_df = df[display_cols] if all(col in df.columns for col in display_cols) else df
+        
         # Display the data table
         st.dataframe(
-            df,
+            display_df,
             column_config={
-                "chain": st.column_config.TextColumn("Chain", width="small"),
                 "portfolio": st.column_config.TextColumn("Portfolio", width="medium"),
                 "strategy": st.column_config.TextColumn("Strategy", width="medium"),
+                "token_symbol": st.column_config.TextColumn("Token", width="small"),
+                "balance": st.column_config.NumberColumn("Balance", width="medium", format="%.6f"),
                 "wallet": st.column_config.TextColumn("Wallet Address", width="large"),
-                "token": st.column_config.TextColumn("Token", width="small"),
-                "balance": st.column_config.NumberColumn("Balance", width="medium", format="%.6f")
             },
             use_container_width=True,
             hide_index=True
@@ -109,23 +114,26 @@ def render_aave_token_balances_page():
         # Add visualizations
         st.subheader("Token Distribution by Chain")
         
+        # Use token_symbol for better visualization labels if available
+        label_col = 'token_symbol' if 'token_symbol' in df.columns else 'token'
+        
         # Group by chain and token, then sum balances
-        chain_token_balances = df.groupby(['chain', 'token'])['balance'].sum().reset_index()
+        chain_token_balances = df.groupby(['chain', label_col])['balance'].sum().reset_index()
         
         # Create a pivot table for visualization
-        pivot_df = chain_token_balances.pivot(index='token', columns='chain', values='balance').fillna(0)
+        pivot_df = chain_token_balances.pivot(index=label_col, columns='chain', values='balance').fillna(0)
         
         # Display the chart
         st.bar_chart(pivot_df)
         
         # Also display a pie chart for overall token distribution
         st.subheader("Overall Token Distribution")
-        token_balances = df.groupby('token')['balance'].sum().reset_index()
+        token_balances = df.groupby(label_col)['balance'].sum().reset_index()
         
         try:
             import plotly.express as px
             
-            fig = px.pie(token_balances, values='balance', names='token',
+            fig = px.pie(token_balances, values='balance', names=label_col,
                         title='AAVE Token Distribution',
                         hover_data=['balance'], 
                         labels={'balance':'Balance'})
