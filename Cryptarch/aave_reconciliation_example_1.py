@@ -3,6 +3,7 @@ import polars as pl
 import os
 import logging
 import sys
+import datetime
 from dotenv import load_dotenv
 from app.backend.consts import PORTFOLIOS, TOKENS, BASE_URLS
 from contextlib import contextmanager
@@ -219,6 +220,111 @@ def batch_process_dataframe(transaction_gen, batch_size=50):
             "timestamp": []
         })
 
+def get_underlying_asset(symbol):
+    """Convert Aave aToken symbol to underlying asset symbol."""
+    symbol = symbol.upper()
+    
+    # Handle specific Aave token patterns
+    if "USDC" in symbol:
+        return "USDC"
+    elif "USDT" in symbol:
+        return "USDT"
+    elif "DAI" in symbol:
+        return "DAI"
+    elif "WETH" in symbol or "ETH" in symbol:
+        return "ETH"
+    elif "WBTC" in symbol or "BTC" in symbol:
+        return "BTC"
+    elif "WMATIC" in symbol or "MATIC" in symbol:
+        return "MATIC"
+    elif symbol.startswith('A'):
+        # For other aTokens, try to extract the underlying token
+        # Remove common prefixes like "a", "aPol", etc.
+        for prefix in ["A", "APOL", "AARB", "AOPT"]:
+            if symbol.startswith(prefix):
+                return symbol[len(prefix):]
+    
+    # If no pattern matches, return the original symbol
+    return symbol
+
+def fetch_coinmetrics_price_data(symbol, start_time, end_time=None, frequency="1d"):
+    """
+    Fetch historical price data from CoinMetrics API.
+    
+    Args:
+        symbol: The token symbol (aToken symbol like aUSDC)
+        start_time: Start time as ISO format string
+        end_time: End time as ISO format string (defaults to now)
+        frequency: Data frequency (1d, 1h, 1m, etc.)
+        
+    Returns:
+        DataFrame with timestamp and price data
+    """
+    try:
+        # Load API key from environment
+        api_key = os.getenv("COINMETRICS_API_KEY")
+        if not api_key:
+            logger.error("COINMETRICS_API_KEY not found in environment variables")
+            return None
+            
+        # Convert aToken symbol to underlying asset
+        asset = get_underlying_asset(symbol)
+        logger.info(f"Fetching price data for asset {asset} (from {symbol})")
+        
+        # Set end time to now if not provided
+        if not end_time:
+            end_time = datetime.datetime.now().isoformat()
+            
+        # Prepare API request
+        url = "https://api.coinmetrics.io/v4/timeseries/asset-metrics"
+        params = {
+            "assets": asset,
+            "metrics": "PriceUSD",
+            "frequency": frequency,
+            "start_time": start_time,
+            "end_time": end_time,
+            "page_size": 999,
+            "api_key": api_key
+        }
+        
+        # Make request
+        logger.info(f"Requesting price data for {asset} from {start_time} to {end_time}")
+        response = requests.get(url, params=params, timeout=30)
+        response.raise_for_status()
+        
+        # Process response
+        data = response.json()
+        if "data" not in data or not data["data"]:
+            logger.warning(f"No price data returned for {asset}")
+            return None
+            
+        # Convert to DataFrame
+        price_data = []
+        for item in data["data"]:
+            if "time" in item and "PriceUSD" in item:
+                price_data.append({
+                    "timestamp": item["time"],
+                    "price": float(item["PriceUSD"])
+                })
+        
+        if not price_data:
+            logger.warning(f"Price data format unexpected for {asset}")
+            return None
+            
+        df = pl.DataFrame(price_data)
+        logger.info(f"Retrieved {len(df)} price points for {asset}")
+        return df
+        
+    except requests.exceptions.RequestException as e:
+        logger.error(f"API request error fetching price data for {symbol}: {str(e)}")
+        return None
+    except (ValueError, KeyError, TypeError) as e:
+        logger.error(f"Data parsing error for {symbol}: {str(e)}")
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error fetching price data for {symbol}: {str(e)}")
+        return None
+
 def main(network="polygon", batch_size=50):
     try:
         logger.info(f"Starting Aave reconciliation for network: {network}")
@@ -267,17 +373,127 @@ def main(network="polygon", batch_size=50):
         # Display the DataFrame
         if len(df) > 0:
             logger.info(f"Retrieved {len(df)} transactions for network {network}")
-            print(f"\n🔢 Transaction Data for {network}:")
-            print(df)
             
             try:
+                # Get unique tokens and fetch price data for each 
+                unique_tokens = df["token"].unique().to_list()
+                logger.info(f"Found {len(unique_tokens)} unique tokens: {unique_tokens}")
+                
+                # First, fetch all price data and store it for lookup
+                price_data = {}
+                min_timestamp = df["timestamp"].min()
+                
+                if min_timestamp:
+                    start_time = min_timestamp.strftime("%Y-%m-%dT%H:%M:%S")
+                    
+                    # Create a price column in the DataFrame
+                    df = df.with_columns(pl.lit(None).alias("price_usd"))
+                    
+                    # Fetch price data for each token type and store in dictionary
+                    for token in unique_tokens:
+                        asset = get_underlying_asset(token)
+                        logger.info(f"Fetching price data for token {token} (asset: {asset})")
+                        
+                        token_price_df = fetch_coinmetrics_price_data(
+                            symbol=token,
+                            start_time=start_time,
+                            frequency="1d"  # Daily frequency is sufficient
+                        )
+                        
+                        if token_price_df is not None and len(token_price_df) > 0:
+                            # Process timestamps to dates for easier matching
+                            token_price_df = token_price_df.with_columns(
+                                pl.col("timestamp").str.to_datetime().dt.replace_time_zone(None).alias("timestamp"),
+                                pl.col("timestamp").str.to_datetime().dt.date().alias("date")
+                            )
+                            
+                            # Convert to dictionary for easy date-based lookup
+                            price_dict = {}
+                            for row in token_price_df.iter_rows(named=True):
+                                price_dict[row["date"]] = row["price"]
+                            
+                            price_data[token] = price_dict
+                            logger.info(f"Found {len(price_dict)} price points for {token} (from {min(price_dict.keys())} to {max(price_dict.keys())})")
+                        else:
+                            logger.warning(f"No price data found for {token}")
+                            price_data[token] = {}
+                    
+                    # Now process each row in the DataFrame individually
+                    updated_prices = []
+                    
+                    for i, row in enumerate(df.iter_rows(named=True)):
+                        token = row["token"]
+                        tx_time = row["timestamp"]
+                        
+                        # Ensure time is timezone naive
+                        if tx_time.tzinfo is not None:
+                            tx_time = tx_time.replace(tzinfo=None)
+                        
+                        tx_date = tx_time.date()
+                        
+                        # Get price dictionary for this token
+                        token_prices = price_data.get(token, {})
+                        
+                        # Try to find exact date match
+                        if tx_date in token_prices:
+                            # Exact match
+                            price = token_prices[tx_date]
+                            updated_prices.append({"index": i, "price": price, "match": "exact"})
+                        elif token_prices:
+                            # Find closest date
+                            dates = list(token_prices.keys())
+                            closest_date = min(dates, key=lambda d: abs((d - tx_date).days))
+                            price = token_prices[closest_date]
+                            days_diff = abs((closest_date - tx_date).days)
+                            updated_prices.append({"index": i, "price": price, "match": f"closest ({days_diff} days)"})
+                        else:
+                            # No price data for this token
+                            updated_prices.append({"index": i, "price": None, "match": "no data"})
+                    
+                    # Count match types for reporting
+                    exact_matches = sum(1 for p in updated_prices if p["match"] == "exact")
+                    closest_matches = sum(1 for p in updated_prices if "closest" in p["match"])
+                    no_data = sum(1 for p in updated_prices if p["match"] == "no data")
+                    
+                    logger.info(f"Price matching results: {exact_matches} exact matches, {closest_matches} closest matches, {no_data} with no data")
+                    
+                    # Update DataFrame with new prices
+                    for update in updated_prices:
+                        if update["price"] is not None:
+                            df = df.with_row_count("_index").with_columns(
+                                pl.when(pl.col("_index") == update["index"])
+                                .then(pl.lit(update["price"]))
+                                .otherwise(pl.col("price_usd"))
+                                .alias("price_usd")
+                            ).drop("_index")
+                    
+                    # Calculate USD value
+                    df = df.with_columns(
+                        pl.when(pl.col("price_usd").is_not_null())
+                        .then(pl.col("value") * pl.col("price_usd"))
+                        .otherwise(None)
+                        .alias("value_usd")
+                    )
+                
+                # Display the DataFrame with prices
+                print(f"\n🔢 Transaction Data for {network} with prices:")
+                print(df)
+                
                 # Save DataFrame to CSV
                 csv_filename = f"aave_transactions_{network}.csv"
                 df.write_csv(csv_filename)
                 logger.info(f"Data saved to {csv_filename}")
                 print(f"\n💾 Data saved to {csv_filename}")
+                
             except Exception as e:
-                logger.error(f"Error saving data to CSV: {str(e)}")
+                logger.error(f"Error processing price data: {str(e)}")
+                print(f"Error adding price data: {str(e)}")
+                
+                # Fallback: save transactions without prices
+                csv_filename = f"aave_transactions_{network}_no_prices.csv"
+                df.write_csv(csv_filename)
+                logger.info(f"Transaction data without prices saved to {csv_filename}")
+                print(f"\n💾 Transaction data without prices saved to {csv_filename}")
         else:
             logger.warning(f"No transactions found for network: {network}")
             print(f"No transactions found for network: {network}")
