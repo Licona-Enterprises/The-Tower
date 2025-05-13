@@ -6,6 +6,7 @@ import sys
 import datetime
 from dotenv import load_dotenv
 from app.backend.consts import PORTFOLIOS, TOKENS, BASE_URLS
+from contextlib import contextmanager
 from typing import Dict, List, Generator, Any
 
 # Configure logging
@@ -18,6 +19,15 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+@contextmanager
+def get_session():
+    """Context manager for requests.Session to ensure proper cleanup."""
+    session = requests.Session()
+    try:
+        yield session
+    finally:
+        session.close()
 
 def get_aave_wallets(portfolios, network="polygon"):
     try:
@@ -60,7 +70,7 @@ def get_aave_token_contracts(tokens, network="polygon"):
         logger.error(f"Error getting Aave token contracts: {str(e)}")
         return []
 
-def fetch_transactions(address, contract_address, api_key, network="polygon", page=1, offset=100):
+def fetch_transactions(session, address, contract_address, api_key, network="polygon", page=1, offset=100):
     """Fetch transactions from the block explorer API."""
     try:
         api_url = BASE_URLS.get(network)
@@ -81,7 +91,7 @@ def fetch_transactions(address, contract_address, api_key, network="polygon", pa
             "apikey": api_key
         }
         
-        response = requests.get(api_url, params=params, timeout=30, verify=False)  # Direct request with verify=False
+        response = session.get(api_url, params=params, timeout=30)  # Added timeout
         response.raise_for_status()  # Raise exception for 4XX/5XX responses
         
         data = response.json()
@@ -101,7 +111,7 @@ def fetch_transactions(address, contract_address, api_key, network="polygon", pa
         logger.error(f"Unexpected error fetching transactions: {str(e)}")
         return []
 
-def stream_wallet_transactions(wallet, token_contracts, api_key, network="polygon"):
+def stream_wallet_transactions(session, wallet, token_contracts, api_key, network="polygon"):
     """
     Generator that streams transactions for a wallet without loading all into memory.
     Yields one transaction at a time.
@@ -111,7 +121,7 @@ def stream_wallet_transactions(wallet, token_contracts, api_key, network="polygo
     for token in token_contracts:
         logger.info(f"Processing token: {token['symbol']} ({token['address']})")
         try:
-            txs = fetch_transactions(wallet, token["address"], api_key, network)
+            txs = fetch_transactions(session, wallet, token["address"], api_key, network)
             
             for tx in txs:
                 try:
@@ -279,7 +289,7 @@ def fetch_coinmetrics_price_data(symbol, start_time, end_time=None, frequency="1
         
         # Make request
         logger.info(f"Requesting price data for {asset} from {start_time} to {end_time}")
-        response = requests.get(url, params=params, timeout=30, verify=False)  # Direct request with verify=False
+        response = requests.get(url, params=params, timeout=30)
         response.raise_for_status()
         
         # Process response
@@ -346,17 +356,19 @@ def main(network="polygon", batch_size=50):
             logger.error(f"No token contracts found for network {network}")
             return
 
-        # Generator to lazily stream all transactions
-        def stream_all_transactions():
-            for wallet in aave_wallets:
-                try:
-                    yield from stream_wallet_transactions(wallet, token_contracts, api_key, network)
-                except Exception as e:
-                    logger.error(f"Error processing wallet {wallet}: {str(e)}")
-                    continue
-        
-        # Process transactions in batches
-        df = batch_process_dataframe(stream_all_transactions(), batch_size)
+        # Create a generator for streaming transactions
+        with get_session() as session:
+            # Generator to lazily stream all transactions
+            def stream_all_transactions():
+                for wallet in aave_wallets:
+                    try:
+                        yield from stream_wallet_transactions(session, wallet, token_contracts, api_key, network)
+                    except Exception as e:
+                        logger.error(f"Error processing wallet {wallet}: {str(e)}")
+                        continue
+            
+            # Process transactions in batches
+            df = batch_process_dataframe(stream_all_transactions(), batch_size)
         
         # Display the DataFrame
         if len(df) > 0:
@@ -491,10 +503,6 @@ def main(network="polygon", batch_size=50):
 
 if __name__ == "__main__":
     try:
-        # Disable SSL warnings since we're using verify=False
-        import urllib3
-        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-        
         # You can change the network here or pass as a parameter when calling the script
         main("polygon")
     except KeyboardInterrupt:
