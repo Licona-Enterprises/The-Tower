@@ -109,10 +109,10 @@ class CoinMetricsService:
         end_time = datetime.now().strftime("%Y-%m-%dT%H:%M:%S.%fZ")
         start_time = (datetime.now() - timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
         
-        # Use ReferenceRate metric with 1s frequency
+        # Use PriceUSD metric with 1s frequency
         params = {
             "assets": ",".join(normalized_symbols),
-            "metrics": "ReferenceRate",
+            "metrics": "PriceUSD",
             "frequency": "1s",
             "api_key": self.api_key,
             "start_time": start_time,
@@ -140,7 +140,7 @@ class CoinMetricsService:
         
         # Group by asset and find the latest data point for each
         for item in data["data"]:
-            if "asset" in item and "ReferenceRate" in item and "time" in item:
+            if "asset" in item and "PriceUSD" in item and "time" in item:
                 normalized_symbol = item["asset"]
                 time_str = item["time"]
                 
@@ -148,7 +148,7 @@ class CoinMetricsService:
                 if normalized_symbol not in asset_latest_data or time_str > asset_latest_data[normalized_symbol]["time"]:
                     asset_latest_data[normalized_symbol] = {
                         "time": time_str,
-                        "price": float(item["ReferenceRate"])
+                        "price": float(item["PriceUSD"])
                     }
         
         # Map the normalized symbols back to original symbols

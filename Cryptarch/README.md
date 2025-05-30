@@ -58,7 +58,7 @@ GET /api/market-data
 Fetches current pricing and metrics for cryptocurrency assets.
 
 **Parameters:**
-- `metrics` (optional): List of metrics to retrieve (default: "ReferenceRate")
+- `metrics` (optional): List of metrics to retrieve (default: "PriceUSD")
 - `assets` (optional): List of asset symbols (default: predefined in DEFAULT_ASSETS)
 
 ### Uniswap Positions

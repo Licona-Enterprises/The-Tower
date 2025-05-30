@@ -6,8 +6,7 @@ import sys
 import datetime
 from dotenv import load_dotenv
 from app.backend.consts import PORTFOLIOS, TOKENS, BASE_URLS
-from contextlib import contextmanager
-from typing import Dict, List, Generator, Any
+from typing import Dict, List, Generator, Any, Optional
 
 # Configure logging
 logging.basicConfig(
@@ -18,16 +17,8 @@ logging.basicConfig(
         logging.StreamHandler(sys.stdout)
     ]
 )
-logger = logging.getLogger(__name__)
 
-@contextmanager
-def get_session():
-    """Context manager for requests.Session to ensure proper cleanup."""
-    session = requests.Session()
-    try:
-        yield session
-    finally:
-        session.close()
+logger = logging.getLogger(__name__)
 
 def get_aave_wallets(portfolios, network="polygon"):
     try:
@@ -70,7 +61,97 @@ def get_aave_token_contracts(tokens, network="polygon"):
         logger.error(f"Error getting Aave token contracts: {str(e)}")
         return []
 
-def fetch_transactions(session, address, contract_address, api_key, network="polygon", page=1, offset=100):
+def get_all_token_contracts(tokens, network="polygon"):
+    """Get all token contracts for a network, not just Aave tokens."""
+    try:
+        all_token_contracts = []
+        network_upper = network.upper()
+        
+        # First, add all Aave tokens
+        aave_tokens = get_aave_token_contracts(tokens, network)
+        all_token_contracts.extend(aave_tokens)
+        
+        # Then add all other tokens with network in their key names
+        for key, token_data in tokens.items():
+            # Skip the AAVE key as we've already processed it
+            if key == "AAVE":
+                continue
+                
+            # Check if this is a token entry (has address, decimals, symbol)
+            if isinstance(token_data, dict) and all(k in token_data for k in ["address", "decimals", "symbol"]):
+                # If token key contains network name, add it
+                if network_upper in key:
+                    all_token_contracts.append(token_data)
+            
+            # Check if this is a nested dictionary of tokens
+            elif isinstance(token_data, dict):
+                for subkey, subtoken_data in token_data.items():
+                    if network_upper in subkey and isinstance(subtoken_data, dict) and all(k in subtoken_data for k in ["address", "decimals", "symbol"]):
+                        all_token_contracts.append(subtoken_data)
+        
+        # Remove duplicates based on contract address
+        unique_addresses = set()
+        unique_tokens = []
+        
+        for token in all_token_contracts:
+            if token["address"].lower() not in unique_addresses:
+                unique_addresses.add(token["address"].lower())
+                unique_tokens.append(token)
+        
+        logger.info(f"Found {len(unique_tokens)} total token contracts for network {network}")
+        return unique_tokens
+    except Exception as e:
+        logger.error(f"Error getting all token contracts: {str(e)}")
+        return []
+
+def get_network_active_tokens_for_columns(tokens_config: Dict, network_name: str) -> List[Dict]:
+    """
+    Identifies all tokens from tokens_config that are active on the specified network.
+    Used to determine which assets need dedicated price columns in the output.
+    """
+    network_specific_tokens = []
+    processed_addresses = set() # To ensure unique tokens if multiple keys point to same address
+
+    def check_and_add_token(token_data: Dict, token_key: str, network_name_lower: str):
+        if isinstance(token_data, dict) and all(k in token_data for k in ["address", "decimals", "symbol"]):
+            active_networks_val = token_data.get("active_networks")
+            is_active_on_network = False
+            
+            if isinstance(active_networks_val, str):
+                is_active_on_network = active_networks_val.lower() == network_name_lower
+            elif isinstance(active_networks_val, list):
+                is_active_on_network = network_name_lower in [n.lower() for n in active_networks_val]
+            
+            # Fallback: if active_networks is missing or doesn't match, check if network name is in the token_key itself
+            # This maintains some of the old logic from get_all_token_contracts if active_networks is not explicit
+            if not is_active_on_network and network_name_lower in token_key.lower():
+                is_active_on_network = True
+                logger.debug(f"Token {token_key} matched network {network_name_lower} by key as fallback.")
+
+            if is_active_on_network:
+                address = token_data["address"].lower()
+                if address not in processed_addresses:
+                    token_info = token_data.copy()
+                    token_info["original_key"] = token_key  # Store the original key for column naming
+                    network_specific_tokens.append(token_info)
+                    processed_addresses.add(address)
+                    logger.debug(f"Added token {token_key} (address: {address}) for network {network_name_lower} pricing columns.")
+
+    network_name_lower = network_name.lower()
+    for key, value in tokens_config.items():
+        # Check if the value itself is a token definition
+        if isinstance(value, dict) and all(k in value for k in ["address", "decimals", "symbol"]):
+            check_and_add_token(value, key, network_name_lower)
+        # Else, check if it's a dictionary континенты other tokens (like "AAVE" or other categories)
+        elif isinstance(value, dict):
+            for sub_key, sub_value in value.items():
+                if isinstance(sub_value, dict) and all(k in sub_value for k in ["address", "decimals", "symbol"]):
+                    check_and_add_token(sub_value, sub_key, network_name_lower)
+    
+    logger.info(f"Found {len(network_specific_tokens)} distinct tokens active on network '{network_name}' for pricing columns.")
+    return network_specific_tokens
+
+def fetch_transactions(address, contract_address, api_key, network="polygon", page=1, offset=100):
     """Fetch transactions from the block explorer API."""
     try:
         api_url = BASE_URLS.get(network)
@@ -91,7 +172,7 @@ def fetch_transactions(session, address, contract_address, api_key, network="pol
             "apikey": api_key
         }
         
-        response = session.get(api_url, params=params, timeout=30)  # Added timeout
+        response = requests.get(api_url, params=params, timeout=30, verify=False)  # Direct request with verify=False
         response.raise_for_status()  # Raise exception for 4XX/5XX responses
         
         data = response.json()
@@ -111,23 +192,43 @@ def fetch_transactions(session, address, contract_address, api_key, network="pol
         logger.error(f"Unexpected error fetching transactions: {str(e)}")
         return []
 
-def stream_wallet_transactions(session, wallet, token_contracts, api_key, network="polygon"):
+def get_wallet_metadata(portfolios, address):
+    """Get portfolio and strategy name for a wallet address."""
+    for portfolio_name, portfolio_data in portfolios.items():
+        strategy_wallets = portfolio_data.get("STRATEGY_WALLETS", {})
+        for strategy_name, wallet in strategy_wallets.items():
+            if wallet.get("address", "").lower() == address.lower():
+                return {
+                    "portfolio_name": portfolio_name,
+                    "strategy_name": strategy_name
+                }
+    return {
+        "portfolio_name": "Unknown",
+        "strategy_name": "Unknown"
+    }
+
+def stream_wallet_transactions(wallet, token_contracts, api_key, network="polygon"):
     """
     Generator that streams transactions for a wallet without loading all into memory.
     Yields one transaction at a time.
     """
     logger.info(f"Fetching Aave transactions for wallet: {wallet} on {network}")
     
+    # Get portfolio and strategy names for this wallet
+    wallet_metadata = get_wallet_metadata(PORTFOLIOS, wallet)
+    
     for token in token_contracts:
         logger.info(f"Processing token: {token['symbol']} ({token['address']})")
         try:
-            txs = fetch_transactions(session, wallet, token["address"], api_key, network)
+            txs = fetch_transactions(wallet, token["address"], api_key, network)
             
             for tx in txs:
                 try:
                     value = int(tx["value"]) / (10 ** token["decimals"])
                     yield {
                         "wallet": wallet,
+                        "portfolio_name": wallet_metadata["portfolio_name"],
+                        "strategy_name": wallet_metadata["strategy_name"],
                         "network": network,
                         "token": tx["tokenSymbol"],
                         "value": value,
@@ -198,18 +299,22 @@ def batch_process_dataframe(transaction_gen, batch_size=50):
         # Return empty DataFrame with expected schema
         logger.warning("No transactions processed, returning empty DataFrame")
         return pl.DataFrame({
-            "timestamp": [],
-            "token": [],
-            "value": [],
+            "portfolio_name": [],
+            "strategy_name": [],
+            "wallet": [],
             "network": [],
-            "wallet": [],            
+            "token": [],
+            "value": [],            
             "from": [],
             "to": [],
-            "hash": []
+            "hash": [],
+            "timestamp": []
         })
     except Exception as e:
         logger.error(f"Unexpected error in batch processing: {str(e)}")
         return pl.DataFrame({
+            "portfolio_name": [],
+            "strategy_name": [],
             "wallet": [],
             "network": [],
             "token": [],
@@ -289,7 +394,7 @@ def fetch_coinmetrics_price_data(symbol, start_time, end_time=None, frequency="1
         
         # Make request
         logger.info(f"Requesting price data for {asset} from {start_time} to {end_time}")
-        response = requests.get(url, params=params, timeout=30)
+        response = requests.get(url, params=params, timeout=30, verify=False)  # Direct request with verify=False
         response.raise_for_status()
         
         # Process response
@@ -325,6 +430,24 @@ def fetch_coinmetrics_price_data(symbol, start_time, end_time=None, frequency="1
         logger.error(f"Unexpected error fetching price data for {symbol}: {str(e)}")
         return None
 
+# Helper function to find price at a specific date from a lookup dictionary
+def find_price_at_date(price_lookup_dict: Dict[datetime.date, float], target_date: datetime.date) -> Optional[float]:
+    if not price_lookup_dict:
+        return None
+    if target_date in price_lookup_dict:
+        return price_lookup_dict[target_date]
+    
+    # Find closest date if exact not found
+    dates = list(price_lookup_dict.keys())
+    if not dates: # Should not happen if price_lookup_dict is not empty, but good practice
+        return None
+        
+    closest_date = min(dates, key=lambda d: abs((d - target_date).days))
+    # Optional: Add a threshold for proximity, e.g., if abs((closest_date - target_date).days) > 7: return None
+    # For now, always return the closest if an exact match isn't found.
+    logger.debug(f"No exact price for {target_date}, using closest date {closest_date} (diff: {abs((closest_date - target_date).days)} days)")
+    return price_lookup_dict[closest_date]
+
 def main(network="polygon", batch_size=50):
     try:
         logger.info(f"Starting Aave reconciliation for network: {network}")
@@ -351,129 +474,121 @@ def main(network="polygon", batch_size=50):
             logger.error(f"No Aave wallets found for network {network}")
             return
             
-        token_contracts = get_aave_token_contracts(TOKENS, network)
+        # Get all token contracts instead of just Aave tokens
+        token_contracts = get_all_token_contracts(TOKENS, network)
         if not token_contracts:
             logger.error(f"No token contracts found for network {network}")
             return
-
-        # Create a generator for streaming transactions
-        with get_session() as session:
-            # Generator to lazily stream all transactions
-            def stream_all_transactions():
-                for wallet in aave_wallets:
-                    try:
-                        yield from stream_wallet_transactions(session, wallet, token_contracts, api_key, network)
-                    except Exception as e:
-                        logger.error(f"Error processing wallet {wallet}: {str(e)}")
-                        continue
             
-            # Process transactions in batches
-            df = batch_process_dataframe(stream_all_transactions(), batch_size)
+        # Log the token contracts we're going to query
+        for token in token_contracts:
+            logger.info(f"Will query transactions for token: {token['symbol']} ({token['address']})")
+
+        # Generator to lazily stream all transactions
+        def stream_all_transactions():
+            for wallet in aave_wallets:
+                try:
+                    yield from stream_wallet_transactions(wallet, token_contracts, api_key, network)
+                except Exception as e:
+                    logger.error(f"Error processing wallet {wallet}: {str(e)}")
+                    continue
+        
+        # Process transactions in batches
+        df = batch_process_dataframe(stream_all_transactions(), batch_size)
         
         # Display the DataFrame
         if len(df) > 0:
             logger.info(f"Retrieved {len(df)} transactions for network {network}")
             
             try:
-                # Get unique tokens and fetch price data for each 
-                unique_tokens = df["token"].unique().to_list()
-                logger.info(f"Found {len(unique_tokens)} unique tokens: {unique_tokens}")
-                
-                # First, fetch all price data and store it for lookup
-                price_data = {}
+                # --- Centralized Price Fetching ---
                 min_timestamp = df["timestamp"].min()
-                
+                start_time = datetime.datetime.now().isoformat() # Default if no transactions
                 if min_timestamp:
                     start_time = min_timestamp.strftime("%Y-%m-%dT%H:%M:%S")
+
+                # 1. Identify all unique token symbols needing price data
+                symbols_requiring_prices = set(df["token"].unique().to_list())
+                
+                # Get tokens for new price columns
+                network_price_column_tokens = get_network_active_tokens_for_columns(TOKENS, network)
+                for token_detail in network_price_column_tokens:
+                    symbols_requiring_prices.add(token_detail['symbol']) # Add their 'symbol' field
+
+                logger.info(f"Identified {len(symbols_requiring_prices)} unique token symbols for price fetching: {symbols_requiring_prices}")
+
+                # 2. Fetch prices and build a comprehensive cache
+                # price_data cache: Key is the symbol passed to fetch_coinmetrics_price_data, Value is dict {date: price}
+                price_data_cache: Dict[str, Dict[datetime.date, float]] = {} 
+                
+                for token_symbol_to_fetch in symbols_requiring_prices:
+                    logger.info(f"Fetching price data for symbol: {token_symbol_to_fetch} (used for cache key)")
                     
-                    # Create a price column in the DataFrame
-                    df = df.with_columns(pl.lit(None).alias("price_usd"))
+                    token_price_df = fetch_coinmetrics_price_data(
+                        symbol=token_symbol_to_fetch, # This symbol is what CoinMetrics needs (e.g. aUSDC, USDC)
+                        start_time=start_time,
+                        frequency="1d"
+                    )
                     
-                    # Fetch price data for each token type and store in dictionary
-                    for token in unique_tokens:
-                        asset = get_underlying_asset(token)
-                        logger.info(f"Fetching price data for token {token} (asset: {asset})")
-                        
-                        token_price_df = fetch_coinmetrics_price_data(
-                            symbol=token,
-                            start_time=start_time,
-                            frequency="1d"  # Daily frequency is sufficient
+                    current_token_price_dict = {}
+                    if token_price_df is not None and len(token_price_df) > 0:
+                        # Process timestamps to dates for easier matching
+                        token_price_df = token_price_df.with_columns(
+                            pl.col("timestamp").str.to_datetime().dt.replace_time_zone(None).alias("timestamp_dt")
+                        ).with_columns(
+                            pl.col("timestamp_dt").dt.date().alias("date") # Ensure 'date' column is datetime.date
                         )
                         
-                        if token_price_df is not None and len(token_price_df) > 0:
-                            # Process timestamps to dates for easier matching
-                            token_price_df = token_price_df.with_columns(
-                                pl.col("timestamp").str.to_datetime().dt.replace_time_zone(None).alias("timestamp"),
-                                pl.col("timestamp").str.to_datetime().dt.date().alias("date")
-                            )
-                            
-                            # Convert to dictionary for easy date-based lookup
-                            price_dict = {}
-                            for row in token_price_df.iter_rows(named=True):
-                                price_dict[row["date"]] = row["price"]
-                            
-                            price_data[token] = price_dict
-                            logger.info(f"Found {len(price_dict)} price points for {token} (from {min(price_dict.keys())} to {max(price_dict.keys())})")
-                        else:
-                            logger.warning(f"No price data found for {token}")
-                            price_data[token] = {}
+                        for row in token_price_df.iter_rows(named=True):
+                            current_token_price_dict[row["date"]] = row["price"]
+                        logger.info(f"Found {len(current_token_price_dict)} price points for {token_symbol_to_fetch}")
+                    else:
+                        logger.warning(f"No price data found for {token_symbol_to_fetch}")
+                    price_data_cache[token_symbol_to_fetch] = current_token_price_dict
+
+                # --- Populate DataFrame with Prices ---
+
+                # 3. Populate the existing "price_usd" column for transacted tokens
+                price_usd_values = []
+                transaction_dates = df["timestamp"].dt.date().to_list() # Pre-calculate dates
+
+                for i, transacted_token_symbol in enumerate(df["token"].to_list()):
+                    tx_date = transaction_dates[i]
+                    prices_for_transacted_token = price_data_cache.get(transacted_token_symbol, {})
+                    price = find_price_at_date(prices_for_transacted_token, tx_date)
+                    price_usd_values.append(price)
+
+                df = df.with_columns(pl.Series("price_usd", price_usd_values).cast(pl.Float64))
+                
+                # Calculate USD value for transactions
+                df = df.with_columns(
+                    pl.when(pl.col("price_usd").is_not_null())
+                    .then(pl.col("value") * pl.col("price_usd"))
+                    .otherwise(None)
+                    .alias("value_usd")
+                )
+                logger.info("Populated 'price_usd' and 'value_usd' columns.")
+
+                # 4. Add and populate new price columns for all network-active tokens
+                logger.info(f"Adding price columns for {len(network_price_column_tokens)} network-active tokens.")
+                for token_detail in network_price_column_tokens:
+                    original_key = token_detail['original_key']
+                    # Sanitize original_key for column name (basic sanitization)
+                    col_name = f"price_{original_key.replace('-', '_').replace('.', '_').replace(' ', '_')}"
                     
-                    # Now process each row in the DataFrame individually
-                    updated_prices = []
+                    # The 'symbol' from token_detail is used to look up in price_data_cache
+                    # This is the symbol as defined in TOKENS (e.g., "aUSDC", "USDC")
+                    symbol_for_lookup = token_detail['symbol'] 
                     
-                    for i, row in enumerate(df.iter_rows(named=True)):
-                        token = row["token"]
-                        tx_time = row["timestamp"]
-                        
-                        # Ensure time is timezone naive
-                        if tx_time.tzinfo is not None:
-                            tx_time = tx_time.replace(tzinfo=None)
-                        
-                        tx_date = tx_time.date()
-                        
-                        # Get price dictionary for this token
-                        token_prices = price_data.get(token, {})
-                        
-                        # Try to find exact date match
-                        if tx_date in token_prices:
-                            # Exact match
-                            price = token_prices[tx_date]
-                            updated_prices.append({"index": i, "price": price, "match": "exact"})
-                        elif token_prices:
-                            # Find closest date
-                            dates = list(token_prices.keys())
-                            closest_date = min(dates, key=lambda d: abs((d - tx_date).days))
-                            price = token_prices[closest_date]
-                            days_diff = abs((closest_date - tx_date).days)
-                            updated_prices.append({"index": i, "price": price, "match": f"closest ({days_diff} days)"})
-                        else:
-                            # No price data for this token
-                            updated_prices.append({"index": i, "price": None, "match": "no data"})
+                    prices_for_column_asset = price_data_cache.get(symbol_for_lookup, {})
                     
-                    # Count match types for reporting
-                    exact_matches = sum(1 for p in updated_prices if p["match"] == "exact")
-                    closest_matches = sum(1 for p in updated_prices if "closest" in p["match"])
-                    no_data = sum(1 for p in updated_prices if p["match"] == "no data")
+                    current_column_price_values = []
+                    for tx_date in transaction_dates: # Reuse pre-calculated transaction dates
+                        price = find_price_at_date(prices_for_column_asset, tx_date)
+                        current_column_price_values.append(price)
                     
-                    logger.info(f"Price matching results: {exact_matches} exact matches, {closest_matches} closest matches, {no_data} with no data")
-                    
-                    # Update DataFrame with new prices
-                    for update in updated_prices:
-                        if update["price"] is not None:
-                            df = df.with_row_count("_index").with_columns(
-                                pl.when(pl.col("_index") == update["index"])
-                                .then(pl.lit(update["price"]))
-                                .otherwise(pl.col("price_usd"))
-                                .alias("price_usd")
-                            ).drop("_index")
-                    
-                    # Calculate USD value
-                    df = df.with_columns(
-                        pl.when(pl.col("price_usd").is_not_null())
-                        .then(pl.col("value") * pl.col("price_usd"))
-                        .otherwise(None)
-                        .alias("value_usd")
-                    )
+                    df = df.with_columns(pl.Series(name=col_name, values=current_column_price_values).cast(pl.Float64))
+                    logger.info(f"Added and populated price column: {col_name}")
                 
                 # Display the DataFrame with prices
                 print(f"\n🔢 Transaction Data for {network} with prices:")
@@ -503,6 +618,10 @@ def main(network="polygon", batch_size=50):
 
 if __name__ == "__main__":
     try:
+        # Disable SSL warnings since we're using verify=False
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        
         # You can change the network here or pass as a parameter when calling the script
         main("polygon")
     except KeyboardInterrupt:

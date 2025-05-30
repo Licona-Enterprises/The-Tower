@@ -1,5 +1,6 @@
 import requests
 import streamlit as st
+from backend.consts import DEFAULT_ASSETS # Import DEFAULT_ASSETS directly assuming 'app' is in sys.path
 
 class ApiService:
     """Service for handling API interactions from the frontend."""
@@ -80,4 +81,33 @@ class ApiService:
             return response.json()
         except Exception as e:
             st.error(f"Error fetching ETH balances: {e}")
-            return None 
+            return None
+
+    def fetch_historical_prices(self, assets, days, indicators=None, with_volatility=False):
+        params = {
+            "assets": assets,
+            "days": days,
+            "with_indicators": True, # Assuming we always want indicators for now
+            "with_volatility": with_volatility
+        }
+        if indicators:
+            params["indicators"] = indicators
+        
+        response = requests.get(f"{self.api_base_url}/api/historical-prices", params=params)
+        response.raise_for_status() # Raise an exception for bad status codes
+        return response.json()
+    
+    def get_available_assets(self):
+        # Using the imported DEFAULT_ASSETS from the backend constants
+        return DEFAULT_ASSETS
+
+    # Placeholder for fetching available indicators - implement if needed
+    # def get_available_indicators(self):
+    #     # Fetch from an endpoint or define statically
+    #     response = requests.get(f"{self.api_base_url}/api/available-indicators") 
+    #     response.raise_for_status()
+    #     return response.json().get("indicators", [])
+
+# Example usage:
+if __name__ == "__main__":
+    pass 

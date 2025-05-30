@@ -34,14 +34,14 @@ historical_price_service = HistoricalPriceService(os.getenv("COINMETRICS_API_KEY
 
 @app.get("/api/market-data")
 async def get_market_data(
-    metrics: List[str] = Query(default=["ReferenceRate"]),
+    metrics: List[str] = Query(default=["PriceUSD"]),
     assets: List[str] = Query(default=DEFAULT_ASSETS)
 ):
     # Added extra validation to ensure we have assets
     if not assets:
         return {"error": "No assets specified"}
     
-    # Fetch data for requested metrics (or default to ReferenceRate)
+    # Fetch data for requested metrics (or default to PriceUSD)
     data = await coinmetrics_service.fetch_market_data(
         metrics=metrics, 
         metric_frequencies=METRIC_FREQUENCIES,
@@ -595,7 +595,7 @@ async def generate_excel_report(
             try:
                 # Get latest market data for common assets
                 assets = DEFAULT_ASSETS
-                metrics = ["ReferenceRate"]  # Just get current prices
+                metrics = ["PriceUSD"]  # Just get current prices
                 print(f"Fetching market data for Excel report...")
                 
                 # Get market data
@@ -609,11 +609,11 @@ async def generate_excel_report(
                     
                     # Process the data
                     for item in market_data["data"]:
-                        if "asset" in item and "ReferenceRate" in item:
+                        if "asset" in item and "PriceUSD" in item:
                             market_rows.append({
                                 "Timestamp": current_timestamp,
                                 "Asset": item["asset"].upper(),
-                                "Price (USD)": float(item["ReferenceRate"]),
+                                "Price (USD)": float(item["PriceUSD"]),
                                 "Time": pd.to_datetime(item["time"]).strftime("%Y-%m-%d %H:%M:%S") if "time" in item else ""
                             })
                     

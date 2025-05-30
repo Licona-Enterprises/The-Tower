@@ -36,6 +36,7 @@ AUTO_REFRESH_INTERVAL = consts.AUTO_REFRESH_INTERVAL
 from uniswap import render_uniswap_page  # Import the uniswap module
 from aave import render_aave_page  # Import the aave module
 from aave_token_balances import render_aave_token_balances_page  # Import the new aave_token_balances module
+from historical_prices import render_historical_prices_page # Import the new historical_prices module
 from api_service import ApiService  # Import the API service
 
 # Initialize API service
@@ -191,7 +192,7 @@ AAVE_REFRESH_INTERVAL = AUTO_REFRESH_INTERVAL         # From consts.py
 
 # Define metrics with their frequencies and display names
 METRICS = {
-    'ReferenceRate': {'freq': METRIC_FREQUENCIES.get('ReferenceRate', '1s'), 'display': 'Price'},
+    'PriceUSD': {'freq': METRIC_FREQUENCIES.get('PriceUSD', '1d'), 'display': 'Price'},
     'ROI30d': {'freq': METRIC_FREQUENCIES.get('ROI30d', '1d'), 'display': '30D Returns'},
     'VtyDayRet30d': {'freq': METRIC_FREQUENCIES.get('VtyDayRet30d', '1d'), 'display': '30D Volatility'},
     'volatility_realized_usd_rolling_7d': {'freq': METRIC_FREQUENCIES.get('volatility_realized_usd_rolling_7d', '1d'), 'display': '7D Volatility'},
@@ -214,7 +215,7 @@ def fetch_market_data():
     return market_data
 
 # Create tabs for different sections
-tab_names = ["Market Data", "Uniswap Positions", "AAVE Positions", "AAVE Token Balances"]
+tab_names = ["Market Data", "Uniswap Positions", "AAVE Positions", "AAVE Token Balances", "Historical Prices"]
 
 # Create a hidden radio button that tracks the tab state 
 # This is necessary because Streamlit doesn't provide a direct way to detect tab changes
@@ -248,15 +249,18 @@ if current_tab_index != prev_tab:
     elif current_tab_index == 3 and prev_tab != 3:  # Changed to AAVE Token Balances
         if 'aave_balances_last_refresh' not in st.session_state:
             st.session_state.aave_balances_last_refresh = datetime.now()
+    elif current_tab_index == 4 and prev_tab != 4: # Changed to Historical Prices
+        # You can add specific refresh logic for this tab if needed
+        pass # Placeholder for now
     
     # Store the new tab index
     st.session_state._previous_tab = prev_tab
     st.session_state._current_tab = current_tab_index
 
 # Create the tabs that respond to the radio selection
-tabs = st.tabs(tab_names)
+market_tab, uniswap_tab,ദേശീയഗാനം_tab,ദേശീയഗാനം_balances_tab, historical_prices_tab = st.tabs(tab_names)
 
-with tabs[0]:
+with market_tab:
     # Create columns for header area
     col1, col2 = st.columns([3, 1])
 
@@ -507,17 +511,20 @@ with tabs[0]:
     if missing_assets:
         st.warning(f"No price data available for: {', '.join(missing_assets)}. This may be due to API limitations.")
 
-with tabs[1]:
+with uniswap_tab:
     # Render uniswap page from imported module
     render_uniswap_page(api_service)
 
-with tabs[2]:
+with ദേശീയഗാനം_tab:
     # Render aave page from imported module
     render_aave_page(api_service)
 
-with tabs[3]:
+with ദേശീയഗാനം_balances_tab:
     # Render AAVE token balances page
     render_aave_token_balances_page()
+
+with historical_prices_tab:
+    render_historical_prices_page()
 
 # Store the current tab for refresh logic
 if "tab_change_enabled" not in st.session_state:
@@ -563,3 +570,6 @@ elif current_tab == 3:  # AAVE Token Balances tab
         pass
     time.sleep(1)  # Small sleep to prevent excessive CPU usage
     st.rerun()
+elif current_tab == 4:  # Historical Prices tab
+    # You can add specific refresh logic for this tab if needed
+    pass # Placeholder for now

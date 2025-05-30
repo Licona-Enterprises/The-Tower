@@ -113,7 +113,7 @@ class HistoricalPriceService:
                 # Prepare API parameters
                 params = {
                     "assets": ",".join(symbols),
-                    "metrics": "PriceUSD",
+                    "metrics": "PriceUSD,volume_trusted_spot_usd_1d",
                     "frequency": "1d",
                     "api_key": self.api_key,
                     "start_time": start_time,
@@ -191,7 +191,8 @@ class HistoricalPriceService:
                 # Add the price data point
                 result[original_symbol].append({
                     "time": item["time"],
-                    "price": float(item["PriceUSD"])
+                    "price": float(item["PriceUSD"]),
+                    "volume": float(item["volume_trusted_spot_usd_1d"])
                 })
         
         return result
@@ -263,7 +264,6 @@ class HistoricalPriceService:
             df['open'] = df['close']
             df['high'] = df['close']
             df['low'] = df['close']
-            df['volume'] = 0  # We don't have volume data
             
             result[symbol] = df
             
